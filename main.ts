@@ -58,6 +58,9 @@ export class CommandLineOptions {
         this.#name = name;
         this.#description = description;
         CommandLineOptions.#entries.set(this.#name, this);
+
+        // update md file
+        if (generatingStaticHelp) CommandLineOptions.generateHelpMarkdownFile();
     }
 
     public option<C extends OptionConfig>(name: string, config?:C): (OptionValue<C & (C['type'] extends string ? unknown : {type:"string"})>) & (string|unknown){
@@ -106,6 +109,9 @@ export class CommandLineOptions {
                 }
             }
         }
+
+        // update md file
+        if (generatingStaticHelp) CommandLineOptions.generateHelpMarkdownFile();
     }
 
     *#getArgs(type?:'required'|'optional') {
@@ -211,6 +217,10 @@ export class CommandLineOptions {
         return (generator.getPreamble?.()??"") + content + (generator.getEnd?.()??"");
     }
 
+    public static generateHelpMarkdownFile() {
+        Deno.writeTextFileSync(this.helpFileURL, this.generateHelp(markdownHelpGenerator));
+    }
+
     public static parseHelpMarkdownFile() {
         try {
             const entries = Deno.readTextFileSync(this.helpFileURL).split(/^## /gm);
@@ -309,22 +319,25 @@ export class MarkdownGenerator implements HelpGenerator {
 }
 
 const commandLineHelpGenerator = new CommandLineHelpGenerator();
+const markdownHelpGenerator = new MarkdownGenerator();
 
+let generatingStaticHelp = false;
 
-const internalOptions = new CommandLineOptions("General Options");
-const help = internalOptions.option("help", {type:"boolean", aliases: ['h'], description: "Show the help page"})
-const generateStaticHelp = internalOptions.option("generate-help", {type:"boolean", _dev:true, description: "Run the program with this option to update this help page"})
-
-if (generateStaticHelp) {
-    addEventListener("load", ()=>{
-        Deno.writeTextFileSync(CommandLineOptions.helpFileURL, CommandLineOptions.generateHelp(new MarkdownGenerator()));
-        logger.success("Generated help page in RUN.md (can be displayed with --help)")
-        Deno.exit(10);
-    })
-}
-
-else if (help) {
-    CommandLineOptions.parseHelpMarkdownFile(); // first parse additional statically saved command line options help
-    CommandLineOptions.printHelp();
-    Deno.exit(0);
+if (globalThis.Deno) {
+    const internalOptions = new CommandLineOptions("General Options");
+    const help = internalOptions.option("help", {type:"boolean", aliases: ['h'], description: "Show the help page"})
+    generatingStaticHelp = internalOptions.option("generate-help", {type:"boolean", _dev:true, description: "Run the program with this option to update this help page"})
+    
+    if (generatingStaticHelp) {
+        addEventListener("load", ()=>{
+            logger.info("Generating help page in RUN.md (can be displayed with --help)")
+            CommandLineOptions.generateHelpMarkdownFile();
+        })
+    }
+    
+    else if (help) {
+        CommandLineOptions.parseHelpMarkdownFile(); // first parse additional statically saved command line options help
+        CommandLineOptions.printHelp();
+        Deno.exit(0);
+    }
 }
