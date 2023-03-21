@@ -1,22 +1,11 @@
 # Run Options
 This file contains an auto-generated list of the available command line options.
 
-## General Options 3
+## DATEX Core
+DATEX Runtime for JavaScript/TypeScript
 
-### Required
- * `--port2`    
-
-### Optional
- * `--port55`   
-
-## General Options 2
-
-### Required
- * `--port2`    
-
-### Optional
- * `--port55`   
+ * `-v, --verbose` Show logs for all levels, including debug logs
 
 ## General Options
 
- * `-h, --help` Show the help page
+ * `-h, --help`    Show the help page

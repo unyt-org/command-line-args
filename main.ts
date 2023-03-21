@@ -2,10 +2,11 @@ import {parse} from "https://deno.land/std@0.168.0/flags/mod.ts";
 import {Logger, ESCAPE_SEQUENCES} from "https://dev.cdn.unyt.org/unyt_core/utils/logger.ts";
 import { getCallerFile } from "https://dev.cdn.unyt.org/unyt_core/utils/caller_metadata.ts";
 
-export type OptionType = "string" | "boolean" | "number"
+export type OptionType = "string" | "boolean" | "number" | "URL"
 export type TypeFromOptionType<T extends OptionType> = (
     T extends "string" ? string : 
     T extends "number" ? number : 
+    T extends "URL" ? URL : 
     boolean)
 
 export type OptionConfig<T extends OptionType = OptionType> = {
@@ -58,7 +59,7 @@ export type OptionValue<C extends OptionConfig> = C extends OptionConfig<infer T
     _OptionsValue<C & (C['type'] extends string ? unknown : {type:"boolean"})>
     : never;
 
-type hasArrayValue<C extends OptionConfig> = C['multiple'] extends true ? true : (C['collectNotPrefixedArgs'] extends true ? true : false);
+type hasArrayValue<C extends OptionConfig> = C['multiple'] extends true ? true : false;
 
 type _OptionsValue<C extends OptionConfig> = C extends OptionConfig<infer T> ? 
   hasArrayValue<C> extends true ? TypeFromOptionType<T>[] : TypeFromOptionType<T> | 
@@ -73,7 +74,7 @@ type ParseOptions = {
     string: string[],
     boolean: string[],
     alias: Record<string,string>,
-    default: Record<string,string|number|boolean>,
+    default: Record<string,TypeFromOptionType<OptionType>>,
     collect: string[],
     unknown?: (arg: string, key?: string, value?: unknown) => unknown;
 }
@@ -184,13 +185,13 @@ export class CommandLineOptions {
     }
 
     #addOptionConfigToParserDefinition(name: string, config: OptionConfig|undefined, def: ParseOptions) {
-        if (config?.type == "string" || config?.type == "number") def.string.push(name);
+        if (config?.type == "string" || config?.type == "number" || config?.type == "URL") def.string.push(name);
         else def.boolean.push(name);
         if (config?.aliases) {
             for (const a of config?.aliases) def.alias[a] = name;
         }
         if (config?.default != undefined) def.default[name] = config.default;
-        if (config?.multiple || config?.collectNotPrefixedArgs) def.collect.push(name);
+        if (config?.multiple) def.collect.push(name);
     }
 
     #getCollectorArgForNotPrefixedArgs(options:OptionsConfig) {
@@ -212,6 +213,7 @@ export class CommandLineOptions {
         let valid = true;
 
         const notPrefixedArgsCollector = options ? this.#getCollectorArgForNotPrefixedArgs(options) : undefined;
+        const notPrefixedArgsCollectorConfig = options?.[<string>notPrefixedArgsCollector];
         const collected:string[] = [];
 
         if (command || throwOnInvalid || notPrefixedArgsCollector) {
@@ -227,7 +229,13 @@ export class CommandLineOptions {
                         return false;
                     }
                 }
-                if (notPrefixedArgsCollector) {
+                
+                if (notPrefixedArgsCollector && !key) {
+                    // not multiple, but has more than 1 collected value
+                    if (!notPrefixedArgsCollectorConfig?.multiple && collected.length) {
+                        logger.error(`Too many collected arguments (${this.#formatArgName(notPrefixedArgsCollector)})`);
+                        Deno.exit(1);
+                    }
                     collected.push(arg);
                 }
                 else if (throwOnInvalid) {
@@ -242,8 +250,10 @@ export class CommandLineOptions {
         const parsed = parse(Deno.args, def);
 
         if (notPrefixedArgsCollector) {
+            // multiple
             if (<any>parsed[notPrefixedArgsCollector] instanceof Array) (<any>parsed[notPrefixedArgsCollector]).push(...collected)
-            else throw "command line argument parsing error";
+            // single
+            else if (collected.length) (<any>parsed)[notPrefixedArgsCollector] = collected[0];
         }
 
         if (!valid) return <any>null;
@@ -252,7 +262,7 @@ export class CommandLineOptions {
 
         for (const [name, config] of Object.entries(options??<OptionsConfig>{})) {
             const val = <unknown> parsed[name];
-            const isMultiple = config?.multiple || config?.collectNotPrefixedArgs;
+            const isMultiple = !!config?.multiple;
 
             if (config?.required && ((!isMultiple && val == undefined) || (isMultiple && !(<any>val).length))) {
                 const [args, placeholder, description] = this.#getArg(name)!;
@@ -268,19 +278,31 @@ export class CommandLineOptions {
             else if (config?.type == "number") {
                 values[name] = isMultiple ? (<string[]>val).map(v=>this.#validateNumber(v,parsed,name)) : this.#validateNumber(<string>val, parsed, name);
             }
+
+            else if (config?.type == "URL") {
+                values[name] = isMultiple ? (<string[]>val).map(v=>this.#validateURL(v,parsed,name)) : this.#validateURL(<string>val, parsed, name);
+            }
+
             else values[name] = val;
         }
 
         return <OptionsConfigValues<C>> values;
     }
 
-    #validateNumber(val:string, parsed:any, name: string):number {
+    #validateNumber(val:string, parsed:any, name: string): number|undefined {
+        if (val == undefined) return val;
         if (!(<string>String(val)).match(/^[\d.]+$/)) {
             logger.error(`Invalid value for command line option ${this.#formatArgName(this.#getUsedCommandLineArgAlias(parsed, name))}: must be a number`);
             Deno.exit(1);
         }
         return parseFloat(val);
     }
+
+    #validateURL(val:string, parsed:any, name: string): URL|undefined {
+        if (val == undefined) return val;
+        return new URL(val, "file://"+Deno.cwd()+"/");
+    }
+
 
     #getUsedCommandLineArgAlias(parsed:Record<string,any>, name:string) {
         const nameCandidates = this.#getAliases(name, false);
