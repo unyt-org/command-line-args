@@ -110,7 +110,9 @@ export class CommandLineOptions {
         CommandLineOptions.#contexts.set(this.#contextName, this);
 
         // update md file
-        if (generatingStaticHelp) CommandLineOptions.generateHelpMarkdownFile();
+        if (generatingStaticHelp) {
+            CommandLineOptions.generateHelpMarkdownFile();
+        }
     }
 
     /**
@@ -577,8 +579,7 @@ let printHelp = false;
 if (globalThis.Deno) {
     defaultOptions = new CommandLineOptions("General Options");
     printHelp = !!defaultOptions.option("help", {type:"boolean", aliases: ['h'], description: "Show the help page"})
-    generatingStaticHelp = !! defaultOptions.option("generate-help", {type:"boolean", _dev:true, description: "Run the program with this option to update this help page"})
-    
+    generatingStaticHelp = !!defaultOptions.option("generate-help", {type:"boolean", _dev:true, description: "Run the program with this option to update this help page"})
     if (generatingStaticHelp) {
         addEventListener("load", ()=>{
             CommandLineOptions.generateHelpMarkdownFile();
