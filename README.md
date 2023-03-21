@@ -15,6 +15,21 @@ const customOptionB = options.option("optionB", {type: "string", description:"De
 const customOptionC = options.option("optionC", {required: true, description:"Describe what this option does"})
 ```
 
+## Define Custom Commands with Options
+
+```typescript
+const commandOptions = options.command("customCommand", {
+    'commandOptionA':  {type:"boolean"},
+    'commandOptionB':  {type:"string"}
+})
+```
+```shell
+$ deno run example.ts customCommand --commandOptionA --commandOptionB valueB
+```
+If the program is now called with the command "customCommand", `commandOptions` is an object containing the command option values.
+If the program is called with a different or no command, `commandOptions` is `null`.
+
+
 ## Generate the help page
 
 The `CommandLineOptions.printHelp()` method can always be called to print all currently declared command line options.

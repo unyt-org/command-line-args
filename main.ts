@@ -1,8 +1,12 @@
 import {parse} from "https://deno.land/std@0.168.0/flags/mod.ts";
-import {Logger, ESCAPE_SEQUENCES} from "unyt_core/utils/logger.ts";
+import {Logger, ESCAPE_SEQUENCES} from "https://dev.cdn.unyt.org/unyt_core/utils/logger.ts";
+import { getCallerFile } from "https://dev.cdn.unyt.org/unyt_core/utils/caller_metadata.ts";
 
-export type OptionType = "string" | "boolean"
-export type TypeFromOptionType<T extends OptionType> = (T extends "string" ? string : boolean)
+export type OptionType = "string" | "boolean" | "number"
+export type TypeFromOptionType<T extends OptionType> = (
+    T extends "string" ? string : 
+    T extends "number" ? number : 
+    boolean)
 
 export type OptionConfig<T extends OptionType = OptionType> = {
     /**
@@ -17,7 +21,7 @@ export type OptionConfig<T extends OptionType = OptionType> = {
     type?: T,
     /**
      * Placeholder label for value in the help view, only displayed
-     * if the type is "string"
+     * if the type is "boolean"
      */
     placeholder?: string,
     /**
@@ -25,13 +29,54 @@ export type OptionConfig<T extends OptionType = OptionType> = {
      */
     default?: TypeFromOptionType<T>
     aliases?: string[],
+    /**
+     * allow the option multiple times and collect all values in an array
+     */
     multiple?: boolean,
-    required?: boolean
+    /**
+     * throw an error if the option is not set (or a defalt is available)
+     */
+    required?: boolean,
+    /**
+     * if false, throw an error if type == "string" and the provided string value is empty
+     * default: true
+     */
+    allowEmptyString?: boolean,
+    /**
+     * if true, add command line args without option prefixes (--option) to the
+     * list of values for this argument
+     */
+    collectNotPrefixedArgs?: boolean
+    /**
+     * don't show a warning if the option name or aliases are already used by
+     * another context
+     */
+    overload?: boolean
 }
 
-export type OptionValue<C extends OptionConfig> = C extends OptionConfig<infer T> ? (
-    (C['multiple'] extends true ? TypeFromOptionType<T>[] : TypeFromOptionType<T>) | (C['required'] extends true ? never : undefined)
-): never;
+export type OptionValue<C extends OptionConfig> = C extends OptionConfig<infer T> ? 
+    _OptionsValue<C & (C['type'] extends string ? unknown : {type:"boolean"})>
+    : never;
+
+type hasArrayValue<C extends OptionConfig> = C['multiple'] extends true ? true : (C['collectNotPrefixedArgs'] extends true ? true : false);
+
+type _OptionsValue<C extends OptionConfig> = C extends OptionConfig<infer T> ? 
+  hasArrayValue<C> extends true ? TypeFromOptionType<T>[] : TypeFromOptionType<T> | 
+ (C['required'] extends true ? never : (hasArrayValue<C> extends true ? never : undefined))
+ : never;
+
+export type OptionsConfig = {[name:string]: OptionConfig|undefined}
+export type OptionsConfigValues<C extends OptionsConfig|undefined> = {[K in keyof C]: OptionValue<C[K] extends OptionConfig ? C[K] : OptionConfig>}
+
+
+type ParseOptions = {
+    string: string[],
+    boolean: string[],
+    alias: Record<string,string>,
+    default: Record<string,string|number|boolean>,
+    collect: string[],
+    unknown?: (arg: string, key?: string, value?: unknown) => unknown;
+}
 
 export interface HelpGenerator {
     formatPrefix(args:string[], placeholder:string | undefined): string
@@ -48,65 +93,218 @@ const logger = new Logger();
 export class CommandLineOptions {
 
     static #contexts = new Map<string, CommandLineOptions>();
-    static helpFileURL = new URL("./RUN.md", "file://"+Deno.cwd()+"/");
+    static defaultHelpFileURL = new URL("./RUN.md", "file://"+Deno.cwd()+"/");
+    static #globalLockContext?: CommandLineOptions;
+    static #lockedCommands = new Map<string, CommandLineOptions>();
 
-    readonly #name: string
+    readonly #contextName: string
     #description?: string
     #optionConfigs: Record<string, OptionConfig|undefined> = {}
+    #helpFile: URL 
 
-    constructor(name: string, description?: string) {
-        this.#name = name;
+    constructor(contextName: string, description?: string, helpFile_experimental:URL|string = CommandLineOptions.defaultHelpFileURL) {
+        if (typeof helpFile_experimental == "string") helpFile_experimental = new URL(helpFile_experimental, getCallerFile());
+        this.#contextName = contextName;
         this.#description = description;
-        CommandLineOptions.#contexts.set(this.#name, this);
+        this.#helpFile = helpFile_experimental;
+        CommandLineOptions.#contexts.set(this.#contextName, this);
 
         // update md file
         if (generatingStaticHelp) CommandLineOptions.generateHelpMarkdownFile();
     }
 
-    public option<C extends OptionConfig>(name: string, config?:C): OptionValue<C & (C['type'] extends string ? unknown : {type:"string"})>{
-        this.#registerOption(name, config);
+    /**
+     * Define options for this context
+     * @param options object with option names as keys, option configs as values
+     * @param allowOtherOptions if false:
+     *      * this and other CommandLineOptions contexts cannot define any further options or commands
+     *      * an error is displayed if an option not defined in the options is used
+     */
+    public options<C extends OptionsConfig>(options: C, allowOtherOptions = false): OptionsConfigValues<C> {
+        const def = this.#getEmptyOptionParserDefinition();
 
-        const string = [];
-        const boolean = [];
-        const collect = [];
-        const alias:Record<string,string> = {};
-
-        const def: Record<string,string|boolean> = {};
-        if (config?.type == "string") string.push(name);
-        else boolean.push(name);
-        if (config?.aliases) {
-            for (const a of config?.aliases) alias[a] = name;
+        for (const [name, config] of Object.entries(options)) {
+            this.#registerOption(name, config);
+            this.#addOptionConfigToParserDefinition(name, config, def);
         }
-        if (config?.default) def[name] = config?.default;
-        if (config?.multiple) collect.push(name);
 
-        const parsed = parse(Deno.args, {
-            string,
-            boolean,
-            alias,
-            default: def,
-            collect
-        })
-        const val = parsed[name];
+        if (!allowOtherOptions) CommandLineOptions.#globalLockContext = this;
 
-        if (config?.required && ((!config?.multiple && val == undefined) || (config?.multiple && !(<any>val).length))) {
-            const [args, placeholder, description] = this.#getArg(name)!;
-            logger.error(`Missing command line option:\n${commandLineHelpGenerator.formatPrefix(args, placeholder)}   ${commandLineHelpGenerator.formatDescription(description, 2)}`);
+        return this.#getArgValues(options, def, undefined, !allowOtherOptions);
+    }
+
+    /**
+     * Define a command with an optional list of options
+     * If the command is not used, the method returns null, otherwise
+     * it returns an object containing the option values
+     * @param name the name of the command
+     * @param options object with option names as keys, option configs as values
+     * @param allowOtherOptionsForCommand if false:
+     *      * this and other CommandLineOptions contexts cannot define any further options for this command
+     *      * an error is displayed if an option not defined in the options is used
+     */
+    public command<C extends OptionsConfig|undefined>(name: string, options?: C, allowOtherOptionsForCommand = false): OptionsConfigValues<C>|null {
+        if (CommandLineOptions.#lockedCommands.has(name)) {
+            logger.error(`Cannot extend command "${name}" for "${this.#contextName}". The command is used and locked by context "${CommandLineOptions.#lockedCommands.has(name) ? CommandLineOptions.#lockedCommands.get(name)!.#contextName : 'unknown'}". No additional command line options can be defined.`);
             Deno.exit(1);
         }
 
-        return parsed[name];
+        const def = this.#getEmptyOptionParserDefinition();
+
+        for (const [name, config] of Object.entries(options??<OptionsConfig>{})) {
+            this.#registerOption(name, config);
+            this.#addOptionConfigToParserDefinition(name, config, def);
+        }
+
+        if (!allowOtherOptionsForCommand) CommandLineOptions.#lockedCommands.set(name, this);
+
+        return <OptionsConfigValues<C>|null> this.#getArgValues(options, def, name, !allowOtherOptionsForCommand);
+    }
+
+    /**
+     * define a single command line option with name and config and get the option value
+     */
+    public option<C extends OptionConfig>(name: string, config?:C): OptionValue<C> {
+        const def = this.#getEmptyOptionParserDefinition();
+        this.#addOptionConfigToParserDefinition(name, config, def);
+        this.#registerOption(name, config);
+        return <OptionValue<C>> this.#getArgValues({[name]:config}, def, undefined)[name];
+    }
+
+    #getEmptyOptionParserDefinition() {
+        return <ParseOptions> {
+            string: [],
+            boolean: [],
+            alias: {},
+            default: {},
+            collect: []
+        }
+    }
+
+    #addOptionConfigToParserDefinition(name: string, config: OptionConfig|undefined, def: ParseOptions) {
+        if (config?.type == "string" || config?.type == "number") def.string.push(name);
+        else def.boolean.push(name);
+        if (config?.aliases) {
+            for (const a of config?.aliases) def.alias[a] = name;
+        }
+        if (config?.default != undefined) def.default[name] = config.default;
+        if (config?.multiple || config?.collectNotPrefixedArgs) def.collect.push(name);
+    }
+
+    #getCollectorArgForNotPrefixedArgs(options:OptionsConfig) {
+        let arg:string|undefined;
+        for (const [name, config] of Object.entries(options)) {
+            if (config?.collectNotPrefixedArgs) {
+                if (arg) {
+                    logger.error(`multiple arguments are used to collect remaining non-prefixed command line arguments: ${this.#formatArgName(name)} and ${this.#formatArgName(arg)}`);
+                    Deno.exit(1);
+                }
+                arg = name;
+            }
+        }
+        return arg;
+    }
+
+    #getArgValues<C extends OptionsConfig|undefined, COM extends string|undefined>(options: C, def: ParseOptions, command?:COM, throwOnInvalid = false): OptionsConfigValues<C> | (COM extends string ? null : never) {
+        
+        let valid = true;
+
+        const notPrefixedArgsCollector = options ? this.#getCollectorArgForNotPrefixedArgs(options) : undefined;
+        const collected:string[] = [];
+
+        if (command || throwOnInvalid || notPrefixedArgsCollector) {
+            let isFirst = true;
+            def.unknown = (arg: string, key?:string) => {
+                if (command) {
+                    if (isFirst) {
+                        isFirst = false;
+                        // no command
+                        if (key) valid = false; 
+                        // wrong command
+                        if (!key && arg !== command) valid = false; 
+                        return false;
+                    }
+                }
+                if (notPrefixedArgsCollector) {
+                    collected.push(arg);
+                }
+                else if (throwOnInvalid) {
+                    logger.error(`Invalid command line option${command? ` for command "${command}"`:""}:\n${arg}`);
+                    Deno.exit(1);
+                }
+                isFirst = false;
+                return false;
+            }
+        }
+        
+        const parsed = parse(Deno.args, def);
+
+        if (notPrefixedArgsCollector) {
+            if (<any>parsed[notPrefixedArgsCollector] instanceof Array) (<any>parsed[notPrefixedArgsCollector]).push(...collected)
+            else throw "command line argument parsing error";
+        }
+
+        if (!valid) return <any>null;
+
+        const values:Record<string,any> = {};
+
+        for (const [name, config] of Object.entries(options??<OptionsConfig>{})) {
+            const val = <unknown> parsed[name];
+            const isMultiple = config?.multiple || config?.collectNotPrefixedArgs;
+
+            if (config?.required && ((!isMultiple && val == undefined) || (isMultiple && !(<any>val).length))) {
+                const [args, placeholder, description] = this.#getArg(name)!;
+                logger.error(`Missing command line option${command? ` for command "${command}"`:""}:\n${commandLineHelpGenerator.formatPrefix(args, placeholder)}   ${commandLineHelpGenerator.formatDescription(description, 2)}`);
+                Deno.exit(1);
+            }
+
+            if (config?.type == "string" && config?.allowEmptyString === false && (!val || !(<any>val).length)) {
+                logger.error(`Invalid value for command line option ${this.#formatArgName(this.#getUsedCommandLineArgAlias(parsed, name))}: cannot be empty`);
+                Deno.exit(1);
+            } 
+
+            else if (config?.type == "number") {
+                values[name] = isMultiple ? (<string[]>val).map(v=>this.#validateNumber(v,parsed,name)) : this.#validateNumber(<string>val, parsed, name);
+            }
+            else values[name] = val;
+        }
+
+        return <OptionsConfigValues<C>> values;
+    }
+
+    #validateNumber(val:string, parsed:any, name: string):number {
+        if (!(<string>String(val)).match(/^[\d.]+$/)) {
+            logger.error(`Invalid value for command line option ${this.#formatArgName(this.#getUsedCommandLineArgAlias(parsed, name))}: must be a number`);
+            Deno.exit(1);
+        }
+        return parseFloat(val);
+    }
+
+    #getUsedCommandLineArgAlias(parsed:Record<string,any>, name:string) {
+        const nameCandidates = this.#getAliases(name, false);
+        // get first occurence of arg key in parsed object -> is option alias that was used
+        for (const key of Object.keys(parsed)) {
+            if (nameCandidates.includes(key)) return key;
+        }
+        return nameCandidates[0];
     }
 
     #registerOption(name: string, config?: OptionConfig) {
+        
+        if (CommandLineOptions.#globalLockContext) {
+            logger.error(`Cannot add command line options for "${this.#contextName}". Options were locked by context "${CommandLineOptions.#globalLockContext.#contextName}". No additional command line options can be defined.`);
+            Deno.exit(1);
+        }
 
-        // check if duplicate option name/alias
-        const existingContext = this.#getContextForArgument(name);
-        if (existingContext && existingContext!=this) logger.warn(`command line option ${this.#formatArgName(name)} is used by two different contexts: "${existingContext.#name}" and "${this.#name}"`)
+        // check if duplicate option name/alias, don't display if running with --help
+        if (!config?.overload && !printHelp) {
+            const [existingContext, optionConfig] = this.#getContextForArgument(name);
+            if (existingContext && existingContext!=this && !optionConfig.overload) logger.warn(`command line option ${this.#formatArgName(name)} is used by two different contexts: "${existingContext.#contextName}" and "${this.#contextName}"`)
 
-        for (const alias of config?.aliases??[]) {
-            const existingContext = this.#getContextForArgument(alias);
-            if (existingContext && existingContext!=this) logger.warn(`command line option ${this.#formatArgName(alias)} is used by two different contexts: "${existingContext.#name}" and "${this.#name}"`)
+            for (const alias of config?.aliases??[]) {
+                const [existingContext, optionConfig] = this.#getContextForArgument(alias);
+                if (existingContext && existingContext!=this && !optionConfig.overload) logger.warn(`command line option ${this.#formatArgName(alias)} is used by two different contexts: "${existingContext.#contextName}" and "${this.#contextName}"`)
+            }
         }
 
         if (!this.#optionConfigs[name]) {
@@ -127,13 +325,13 @@ export class CommandLineOptions {
     #getContextForArgument(arg:string) {
         for (const [_name, context] of CommandLineOptions.#contexts) {
             // check default name
-            if (arg in context.#optionConfigs) return context;
+            if (arg in context.#optionConfigs) return <[CommandLineOptions, OptionConfig]>[context, context.#optionConfigs[arg]];
             // check aliases
             for (const opt of Object.values(context.#optionConfigs)) {
-                if (opt?.aliases?.includes(arg)) return context;
+                if (opt?.aliases?.includes(arg)) return <[CommandLineOptions, OptionConfig]>[context, opt];
             }
         }
-
+        return []
     }
 
     *#getArgs(type?:'required'|'optional') {
@@ -152,23 +350,18 @@ export class CommandLineOptions {
         const args = this.#getAliases(name);
         return <[string[], string|undefined, string]> [args, config?.type == "boolean" ? undefined : this.#getPlacholdder(name), config?.description??""];
     }
-    #getAliases(name:string) {
+    #getAliases(name:string, formatted = true) {
         const config = this.#optionConfigs[name];
         const aliases = [];
-        for (const a of config?.aliases??[]) aliases.push(this.#formatArgName(a));
-        aliases.push(this.#formatArgName(name));
+        for (const a of config?.aliases??[]) aliases.push(formatted ? this.#formatArgName(a) : a);
+        aliases.push(formatted ? this.#formatArgName(name): name);
         return aliases;
     }
     #getPlacholdder(name:string) {
         const config = this.#optionConfigs[name];
-        if (config?.type !== "boolean" && config?.placeholder) return config.placeholder.toUpperCase(); 
+        if (config?.type !== "boolean" && config?.placeholder) return config.placeholder;
         else return null;
     }
-    #getDescription(name:string) {
-        const config = this.#optionConfigs[name];
-        return config?.description??"";
-    }
-
 
     #formatArgName(name:string) {
            return (name.length == 1 ? '-':'--') + name;
@@ -182,7 +375,7 @@ export class CommandLineOptions {
         let content = "";
         let max_prefix_size = 0;
 
-        content += generator.formatTitle(this.#name, 2);
+        content += generator.formatTitle(this.#contextName, 2);
         if (this.#description) content += `\n${generator.formatDescription(this.#description, 1)}`
 
         const requiredArgs = [...this.#getArgs("required")];
@@ -209,9 +402,11 @@ export class CommandLineOptions {
         return <[string,number]>[content, max_prefix_size];
     }
 
-    public parseHelpMarkdownContent(content:string) {
-        
-
+    public generateHelpMarkdownFile() {
+        if (!this.#helpFile.toString().startsWith("file://")) return false; // can only save file:// paths
+        logger.info("Generating help page in "+this.#helpFile.pathname+" (can be displayed with --help)")
+        Deno.writeTextFileSync(this.#helpFile, CommandLineOptions.generateHelp(markdownHelpGenerator));
+        return true;
     }
 
     public static printHelp(keepOrder = false) {
@@ -237,13 +432,46 @@ export class CommandLineOptions {
         return (generator.getPreamble?.()??"") + content + (generator.getEnd?.()??"");
     }
 
+
+    static #generating = false;
+
     public static generateHelpMarkdownFile() {
-        Deno.writeTextFileSync(this.helpFileURL, this.generateHelp(markdownHelpGenerator));
+        // delayed / bundled generation
+        if (this.#generating) return;
+        this.#generating = true;
+        setTimeout(()=>{
+            this.#generating = false;
+
+            if (!this.#contexts.size) logger.error("Cannot create Help file, no command line options registered");
+            // only save help file for last #context, all contexts before are imported modules (assuming only static imports were used (TODO:?))
+            for (const ctx of [...this.#contexts.values()].toReversed()) {
+                if (ctx.#helpFile.toString().startsWith("file://")) {
+                    ctx.generateHelpMarkdownFile();
+                    return;
+                }
+            }
+            // no custom context, just fall back to default file path
+            [...this.#contexts.values()][0].generateHelpMarkdownFile();
+        }, 1000);
+
+   
     }
 
-    public static parseHelpMarkdownFile() {
+    public static parseHelpMarkdownFiles() {
+        // const parsed = new Set<string>();
+        // for (const ctx of this.#contexts.values()) {
+        //     const file_path = ctx.#helpFile.toString();
+        //     console.log(file_path, ctx.#name)
+        //     if (parsed.has(file_path)) continue;
+        //     parsed.add(file_path);
+        //     this.parseHelpMarkdownFile(ctx.#helpFile)
+        // }
+        return this.parseHelpMarkdownFile(this.defaultHelpFileURL);
+    }
+
+    public static parseHelpMarkdownFile(file:URL) {
         try {
-            const entries = Deno.readTextFileSync(this.helpFileURL).split(/^## /gm);
+            const entries = Deno.readTextFileSync(file).split(/^## /gm);
             MarkdownGenerator.generalDescription = entries.shift()?.trim() ?? MarkdownGenerator.generalDescription;
 
             for (const e of entries) {
@@ -287,9 +515,10 @@ export class CommandLineOptions {
 
                 
             }
+            return true;
         }
         catch {
-            // ignore if file does not exist
+            return false;
         }
     }
 } 
@@ -334,7 +563,7 @@ export class MarkdownGenerator implements HelpGenerator {
         return description;
     }
     formatTitle(title: string,level: number): string {
-        return `\n${'#'.repeat(level)} ${title}`
+        return title ? `\n${'#'.repeat(level)} ${title}` : '\n'
     }
 }
 
@@ -343,22 +572,34 @@ const markdownHelpGenerator = new MarkdownGenerator();
 
 let generatingStaticHelp = false;
 let defaultOptions: CommandLineOptions
+let printHelp = false;
 
 if (globalThis.Deno) {
     defaultOptions = new CommandLineOptions("General Options");
-    const help = defaultOptions.option("help", {type:"boolean", aliases: ['h'], description: "Show the help page"})
+    printHelp = !!defaultOptions.option("help", {type:"boolean", aliases: ['h'], description: "Show the help page"})
     generatingStaticHelp = !! defaultOptions.option("generate-help", {type:"boolean", _dev:true, description: "Run the program with this option to update this help page"})
     
     if (generatingStaticHelp) {
         addEventListener("load", ()=>{
-            logger.info("Generating help page in RUN.md (can be displayed with --help)")
             CommandLineOptions.generateHelpMarkdownFile();
+            // terminate after some time (TODO: how to handle this)
+            setTimeout(()=>Deno.exit(10), 5000);
         })
     }
     
-    else if (help) {
-        CommandLineOptions.parseHelpMarkdownFile(); // first parse additional statically saved command line options help
-        CommandLineOptions.printHelp(true);
-        Deno.exit(0);
+    else if (printHelp) {
+        const foundHelpFile = CommandLineOptions.parseHelpMarkdownFiles(); // first parse additional statically saved command line options help
+        // help md file exists, print from file
+        if (foundHelpFile) {
+            CommandLineOptions.printHelp(true);
+            Deno.exit(0);
+        }
+        // load until help available, print help afterwards
+        else {
+            addEventListener("load", ()=>{
+                CommandLineOptions.printHelp();
+                Deno.exit(0);
+            })
+        }
     }
 }
