@@ -1,13 +1,13 @@
 # Command Line Argument Manager
 
-This tool is based on <https://deno.land/std/flags/mod.ts> and provides a straightforward way to declare and parse command line options.
+This tool is based on <https://deno.land/std/flags/mod.ts> and provides a straightforward way to declare and parse command line options for a deno program.
 A help page can be automatically generated and viewed with `--help`.
 
 ## Define Command Line Options
 
 ```typescript
 // create a CommandLineOptions instance
-const options = new CommandLineOptions("Name of the Program/Libarary", "Describe what this program does");
+const options = new CommandLineOptions("Name of the Program/Library", "Describe what this program does");
 
 // declare options and get their values
 const customOptionA = options.option("optionA", {type: "boolean", description:"Describe what this option does"})
@@ -35,8 +35,7 @@ If the program is called with a different or no command, `commandOptions` is `nu
 The `CommandLineOptions.printHelp()` method can always be called to print all currently declared command line options.
 
 When using the `--help` option, this method is also called in the background, and the process is stopped directly afterwards.
-In this scenario, custom command line options declared during the initialization of the program mit not yet be loaded and not shown
-on the help page.
+In this scenario, custom command line options declared during the initialization of the program might not yet be loaded and not shown on the help page.
 
 For this reason, this tool allows you to generate a static help page, `RUN.md` which serves as a human readable help document, but is
 also parsed by the command line argument manager to display a help page in the console when using `--help`.
