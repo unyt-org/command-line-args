@@ -82,6 +82,7 @@ type ParseOptions = {
 export interface HelpGenerator {
     formatPrefix(args:string[], placeholder:string | undefined): string
     formatDescription(description: string, level: number): string
+    formatDefault(value: any): string
     formatTitle(title: string, level: number): string
     getPreamble?(): string
     getEnd?(): string
@@ -93,6 +94,9 @@ const logger = new Logger();
 
 export class CommandLineOptions {
 
+    static collecting = false; // true when --generate-help called or --help without a static file
+    static _collector?: ()=>any; // collector callback
+
     static #contexts = new Map<string, CommandLineOptions>();
     static defaultHelpFileURL = new URL("./RUN.md", "file://"+Deno.cwd()+"/");
     static #globalLockContext?: CommandLineOptions;
@@ -103,11 +107,21 @@ export class CommandLineOptions {
     #optionConfigs: Record<string, OptionConfig|undefined> = {}
     #helpFile: URL 
 
-    constructor(contextName: string, description?: string, helpFile_experimental:URL|string = CommandLineOptions.defaultHelpFileURL) {
-        if (typeof helpFile_experimental == "string") helpFile_experimental = new URL(helpFile_experimental, getCallerFile());
+
+    // capture args up until this point, exit afterwards
+    static capture():Promise<never> {
+        if (this._collector) {
+            this._collector();
+            return new Promise((resolve)=>setTimeout(resolve, 60_000))
+        }
+        else throw "command line options not collecting";
+    }
+
+    constructor(contextName: string, description?: string, helpFile?:URL|string) {
+        helpFile = new URL(helpFile??"./RUN.md", getCallerFile());
         this.#contextName = contextName;
         this.#description = description;
-        this.#helpFile = helpFile_experimental;
+        this.#helpFile = helpFile;
         CommandLineOptions.#contexts.set(this.#contextName, this);
 
         // update md file
@@ -321,7 +335,7 @@ export class CommandLineOptions {
         }
 
         // check if duplicate option name/alias, don't display if running with --help
-        if (!config?.overload && !printHelp) {
+        if (!config?.overload && !showHelp) {
             const [existingContext, optionConfig] = this.#getContextForArgument(name);
             if (existingContext && existingContext!=this && !optionConfig.overload) logger.warn(`command line option ${this.#formatArgName(name)} is used by two different contexts: "${existingContext.#contextName}" and "${this.#contextName}"`)
 
@@ -372,7 +386,7 @@ export class CommandLineOptions {
         if (type == 'required' && !config?.required) return;
         if (type == 'optional' && config?.required) return;
         const args = this.#getAliases(name);
-        return <[string[], string|undefined, string]> [args, config?.type == "boolean" ? undefined : this.#getPlacholdder(name), config?.description??""];
+        return <[string[], string|undefined, string, any]> [args, config?.type == "boolean" ? undefined : this.#getPlacholdder(name), config?.description??"", config?.default];
     }
     #getAliases(name:string, formatted = true) {
         const config = this.#optionConfigs[name];
@@ -408,33 +422,35 @@ export class CommandLineOptions {
         if (requiredArgs.length) content += "\n" + generator.formatTitle("Required", 3);
         else content += generator.formatTitle("", 3);
 
-        for (const [args, placeholder, description] of requiredArgs) {
+        for (const [args, placeholder, description, defaultVal] of requiredArgs) {
             const prefix = generator.formatPrefix(args, placeholder);
             const size = CommandLineOptions.#getStringLengthWithoutFormatters(prefix);
             if (size > max_prefix_size) max_prefix_size = size;
-            content += `\n${prefix}\x01${" ".repeat(generator.getMinSpacing?.()??1)}${generator.formatDescription(description, 2)}`
+            const defaultText = defaultVal ? generator.formatDefault(defaultVal) : ""
+            content += `\n${prefix}\x01${" ".repeat(generator.getMinSpacing?.()??1)}${generator.formatDescription(description + defaultText, 2)}`
         }
 
         if (requiredArgs.length && optionalArgs.length) content += "\n" + generator.formatTitle("Optional", 3);
-        for (const [args, placeholder, description] of optionalArgs) { 
+        for (const [args, placeholder, description, defaultVal] of optionalArgs) { 
             const prefix = generator.formatPrefix(args, placeholder);
             const size = CommandLineOptions.#getStringLengthWithoutFormatters(prefix);
             if (size > max_prefix_size) max_prefix_size = size;
-            content += `\n${prefix}\x01${" ".repeat(generator.getMinSpacing?.()??1)}${generator.formatDescription(description, 2)}`
+            const defaultText = defaultVal ? generator.formatDefault(defaultVal) : ""
+            content += `\n${prefix}\x01${" ".repeat(generator.getMinSpacing?.()??1)}${generator.formatDescription(description + defaultText, 2)}`
         }
 
         return <[string,number]>[content, max_prefix_size];
     }
 
-    public generateHelpMarkdownFile() {
+    public generateHelpMarkdownFile(log = true) {
         if (!this.#helpFile.toString().startsWith("file://")) return false; // can only save file:// paths
-        logger.info("Generating help page in "+this.#helpFile.pathname+" (can be displayed with --help)")
-        Deno.writeTextFileSync(this.#helpFile, CommandLineOptions.generateHelp(markdownHelpGenerator));
+        if (log) logger.info("Generating help page in "+this.#helpFile.pathname+" (can be displayed with --help)")
+        Deno.writeTextFileSync(this.#helpFile, CommandLineOptions.generateHelp(markdownHelpGenerator, true));
         return true;
     }
 
     public static printHelp(keepOrder = false) {
-        logger.plain(this.generateHelp(commandLineHelpGenerator, keepOrder))
+        console.log(this.generateHelp(commandLineHelpGenerator, keepOrder))
     }
 
     public static generateHelp(generator: HelpGenerator, keepOrder = false) {
@@ -459,7 +475,7 @@ export class CommandLineOptions {
 
     static #generating = false;
 
-    public static generateHelpMarkdownFile() {
+    public static generateHelpMarkdownFile(log = true) {
         // delayed / bundled generation
         if (this.#generating) return;
         this.#generating = true;
@@ -469,13 +485,13 @@ export class CommandLineOptions {
             if (!this.#contexts.size) logger.error("Cannot create Help file, no command line options registered");
             // only save help file for last #context, all contexts before are imported modules (assuming only static imports were used (TODO:?))
             for (const ctx of [...this.#contexts.values()].toReversed()) {
-                if (ctx.#helpFile.toString().startsWith("file://")) {
-                    ctx.generateHelpMarkdownFile();
+                if (ctx.#helpFile.protocol === "file:") {
+                    ctx.generateHelpMarkdownFile(log);
                     return;
                 }
             }
             // no custom context, just fall back to default file path
-            [...this.#contexts.values()][0].generateHelpMarkdownFile();
+            [...this.#contexts.values()][0].generateHelpMarkdownFile(log);
         }, 1000);
 
    
@@ -485,10 +501,10 @@ export class CommandLineOptions {
         // const parsed = new Set<string>();
         // for (const ctx of this.#contexts.values()) {
         //     const file_path = ctx.#helpFile.toString();
-        //     console.log(file_path, ctx.#name)
+        //     console.log(file_path, ctx.#contextName)
         //     if (parsed.has(file_path)) continue;
-        //     parsed.add(file_path);
-        //     this.parseHelpMarkdownFile(ctx.#helpFile)
+        //     // parsed.add(file_path);
+        //     // this.parseHelpMarkdownFile(ctx.#helpFile)
         // }
         return this.parseHelpMarkdownFile(this.defaultHelpFileURL);
     }
@@ -561,6 +577,9 @@ export class CommandLineHelpGenerator implements HelpGenerator {
         if (level == 1) description = '\n' + description.replace(/^/gm, '  ');
         return `${ESCAPE_SEQUENCES.UNYT_GREY}${description}${ESCAPE_SEQUENCES.RESET}`;
     }
+    formatDefault(value: any): string {
+        return `${ESCAPE_SEQUENCES.UNYT_GREY} (default: ${value})${ESCAPE_SEQUENCES.RESET}`;
+    }
     formatTitle(title: string,level: number): string {
         if (level >= 3) return `\n  ${title}${ESCAPE_SEQUENCES.RESET}`
         else return `\n${ESCAPE_SEQUENCES.BOLD}${title}${ESCAPE_SEQUENCES.RESET}`
@@ -583,6 +602,9 @@ export class MarkdownGenerator implements HelpGenerator {
     formatPrefix(args: string[],placeholder: string|undefined) {
         return ` * \`${args.join(", ")}${placeholder?' '+ placeholder:''}\``;
     }
+    formatDefault(value: any): string {
+        return ` (default: ${value})`;
+    }
     formatDescription(description: string): string {
         return description;
     }
@@ -596,33 +618,45 @@ const markdownHelpGenerator = new MarkdownGenerator();
 
 let generatingStaticHelp = false;
 let defaultOptions: CommandLineOptions
-let printHelp = false;
+
+let showHelp = false;
 
 if (globalThis.Deno) {
-    defaultOptions = new CommandLineOptions("General Options");
-    printHelp = !!defaultOptions.option("help", {type:"boolean", aliases: ['h'], description: "Show the help page"})
+    defaultOptions = new CommandLineOptions("General Options", undefined, CommandLineOptions.defaultHelpFileURL);
+    showHelp = CommandLineOptions.collecting = !!defaultOptions.option("help", {type:"boolean", aliases: ['h'], description: "Show the help page"})
     generatingStaticHelp = !!defaultOptions.option("generate-help", {type:"boolean", _dev:true, description: "Run the program with this option to update this help page"})
     if (generatingStaticHelp) {
-        addEventListener("load", ()=>{
+        CommandLineOptions.collecting = true;
+        addEventListener("load", CommandLineOptions._collector = ()=>{
             CommandLineOptions.generateHelpMarkdownFile();
             // terminate after some time (TODO: how to handle this)
             setTimeout(()=>Deno.exit(10), 5000);
         })
     }
-    
-    else if (printHelp) {
+
+    else if (showHelp) {
         const foundHelpFile = CommandLineOptions.parseHelpMarkdownFiles(); // first parse additional statically saved command line options help
         // help md file exists, print from file
         if (foundHelpFile) {
-            CommandLineOptions.printHelp(true);
+            CommandLineOptions.printHelp(true); // must always be true to print in the same order as in the markdown file
             Deno.exit(0);
         }
         // load until help available, print help afterwards
         else {
-            addEventListener("load", ()=>{
-                CommandLineOptions.printHelp();
+            CommandLineOptions.collecting = true;
+            addEventListener("load", CommandLineOptions._collector = () => {
+                CommandLineOptions.printHelp(true);
                 Deno.exit(0);
             })
         }
     }
+    
+    // // otherwise, also generate, but keep program running
+    // else {
+    //     addEventListener("load", CommandLineOptions._collector = ()=>{
+    //         CommandLineOptions.generateHelpMarkdownFile(false);
+    //     })
+    // }
+        
 }
+
