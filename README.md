@@ -59,7 +59,8 @@ console.log({
 });
 ```
 
-> [!NOTE] The command line options should always be defined at the top-level
+> [!NOTE] 
+> The command line options should always be defined at the top-level
 > scope of a module before any other program logic is done.
 >
 > It is recommended to use `CommandLineOptions.capture()` at the end of the
