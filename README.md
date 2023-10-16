@@ -133,7 +133,8 @@ await CommandLineOptions.capture();
 console.log(advancedTravelOptions);
 ```
 
-> [!NOTE] You can also define more than one sub-command with multiple
+> [!NOTE]
+> You can also define more than one sub-command with multiple
 > `option.command()` declarations.
 
 The program can now be started with the `advanced` subcommand and the declared
