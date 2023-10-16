@@ -1,4 +1,4 @@
-import { getCallerFile } from "https://deno.land/x/caller_metadata@v0.0.1/src/main.ts";
+import { getCallerFile } from "https://deno.land/x/caller_metadata@v0.0.3/src/main.ts";
 
 import { CommandLineHelpGenerator } from "./generators/cli-generator.ts";
 import { MarkdownGenerator } from "./generators/markdown-generator.ts";
