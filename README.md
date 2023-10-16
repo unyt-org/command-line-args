@@ -1,7 +1,20 @@
 # Command Line Argument Manager
 
-This tool is based on <https://deno.land/std/flags/mod.ts> and provides a straightforward way to declare and parse command line options for a deno program.
-A help page can be automatically generated and viewed with `--help`.
+This library provides a straightforward way to declare and
+parse command line options and sub-commands for a deno program.
+
+It comes with the following features:
+
+ * Input validation
+ * Type-safe definitions
+ * Default arguments
+ * Resolution of relative paths arguments
+ * Automatic help page display in CLI (`--help`)
+ * Automatic help file generation (`--generate-help`)
+
+With this library, it is possible for multiple modules in a program to declare and access their own command line arguments at the same time.
+
+This libary is based on <https://deno.land/std/flags/mod.ts>.
 
 ## Defining Command Line Options
 
